@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import io
+from streamlit_gsheets import GSheetsConnection
 
 # Konfigurasi Halaman
 st.set_page_config(
@@ -9,6 +10,21 @@ st.set_page_config(
     page_icon="⚡",
     layout="wide"
 )
+
+# ---------------------------------------------------------
+# KONEKSI KE GOOGLE SHEETS (Satu Sumber Kebenaran)
+# ---------------------------------------------------------
+# Membuka koneksi menggunakan st.connection (Butuh library st-gsheets-connection & .streamlit/secrets.toml)
+conn = st.connection("gsheets", type=GSheetsConnection)
+
+# Membaca data dari Google Sheets secara langsung (ttl=0 memastikan data fresh setiap reload)
+try:
+    df = conn.read(worksheet="Sheet1", ttl=0)
+    # Bersihkan baris kosong (NaN) yang mungkin terbaca dari Sheets
+    df = df.dropna(how="all")
+except Exception as e:
+    st.error(f"Gagal terhubung ke Google Sheets. Pastikan kredensial dan URL di secrets.toml benar. Error: {e}")
+    st.stop()
 
 # ---------------------------------------------------------
 # DATABASE KOTA & PROVINSI INDONESIA
@@ -79,42 +95,21 @@ def generate_excel_template():
     processed_data = output.getvalue()
     return processed_data
 
-# ---------------------------------------------------------
-# INISIALISASI DATA
-# ---------------------------------------------------------
-if "landlist_data" not in st.session_state:
-    st.session_state.landlist_data = pd.DataFrame([
-        {
-            "Site ID": "VGR-BGR-001", "Nama Lokasi": "SPBU Pajajaran", "Provinsi": "Jawa Barat",
-            "Kota/Kabupaten": "Bogor", "Jumlah EVCS": 0, "Jumlah BSS": 1, "PIC Hunter": "Tim Bogor",
-            "Status Approach": "Done", "Status Deal": "Deal", "Kelengkapan Dokumen": "Submitted Complete",
-            "Approval VGREEN": "Approved", "Tanggal Update": pd.to_datetime("2026-10-01")
-        },
-        {
-            "Site ID": "VGR-MED-001", "Nama Lokasi": "Rest Area Tol Kualanamu", "Provinsi": "Sumatera Utara",
-            "Kota/Kabupaten": "Deli Serdang", "Jumlah EVCS": 2, "Jumlah BSS": 1, "PIC Hunter": "Tim Sumatera",
-            "Status Approach": "Done", "Status Deal": "Negotiating", "Kelengkapan Dokumen": "Pending",
-            "Approval VGREEN": "Pending", "Tanggal Update": pd.to_datetime("2026-10-05")
-        }
-    ])
-
-df = st.session_state.landlist_data
-
 # Header Dashboard
 st.title("⚡ Dashboard Pipeline Pengadaan Lahan VGREEN")
-st.caption("Monitoring status pipeline: Approach -> Deal -> Dokumen Lengkap -> Approval VGREEN")
+st.caption("Monitoring status pipeline: Approach -> Deal -> Dokumen Lengkap -> Approval VGREEN (Synced with Google Sheets)")
 st.markdown("---")
 
 # ---------------------------------------------------------
 # 1. KPI METRICS
 # ---------------------------------------------------------
 total_titik = len(df)
-total_approach = len(df[df["Status Approach"] == "Done"])
-total_deal = len(df[df["Status Deal"] == "Deal"])
-total_doc = len(df[df["Kelengkapan Dokumen"] == "Submitted Complete"])
-total_approved = len(df[df["Approval VGREEN"] == "Approved"])
-total_evcs = df["Jumlah EVCS"].sum()
-total_bss = df["Jumlah BSS"].sum()
+total_approach = len(df[df["Status Approach"] == "Done"]) if total_titik > 0 else 0
+total_deal = len(df[df["Status Deal"] == "Deal"]) if total_titik > 0 else 0
+total_doc = len(df[df["Kelengkapan Dokumen"] == "Submitted Complete"]) if total_titik > 0 else 0
+total_approved = len(df[df["Approval VGREEN"] == "Approved"]) if total_titik > 0 else 0
+total_evcs = df["Jumlah EVCS"].sum() if total_titik > 0 else 0
+total_bss = df["Jumlah BSS"].sum() if total_titik > 0 else 0
 
 col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("📍 Total Titik Lahan", total_titik)
@@ -169,41 +164,35 @@ with chart_col2:
     st.plotly_chart(fig_fishbone, use_container_width=True)
 
 # ---------------------------------------------------------
-# 3. DAILY PROGRESS CHART (FORMAT HARIAN TANPA JAM)
+# 3. DAILY PROGRESS CHART
 # ---------------------------------------------------------
 st.markdown("---")
 st.subheader("📈 Daily Progress Chart (Pergerakan Harian Lahan)")
 
-# Mengubah Tanggal Update menjadi format Date saja (tanpa komponen waktu)
-df['Tanggal Update'] = pd.to_datetime(df['Tanggal Update']).dt.date
+if not df.empty and "Tanggal Update" in df.columns:
+    df_chart = df.copy()
+    df_chart['Tanggal Update'] = pd.to_datetime(df_chart['Tanggal Update']).dt.date
+    daily_data = df_chart.groupby(['Tanggal Update', 'Approval VGREEN']).size().reset_index(name='Jumlah Titik')
 
-daily_data = df.groupby(['Tanggal Update', 'Approval VGREEN']).size().reset_index(name='Jumlah Titik')
-
-fig_daily = px.line(
-    daily_data, 
-    x="Tanggal Update", 
-    y="Jumlah Titik", 
-    color="Approval VGREEN",
-    markers=True, 
-    title="Tren Pergerakan Status Lahan Harian",
-    labels={"Tanggal Update": "Tanggal", "Jumlah Titik": "Total Lahan"},
-    color_discrete_sequence=px.colors.qualitative.Set1
-)
-
-# Memaksa tipe axis X (X-Axis) menjadi kategori agar tidak menampilkan interpolasi jam/menit
-fig_daily.update_xaxes(type='category', tickformat="%Y-%m-%d")
-
-fig_daily.update_layout(height=400, xaxis_title="Tanggal", yaxis_title="Jumlah Titik Lahan")
-st.plotly_chart(fig_daily, use_container_width=True)
+    fig_daily = px.line(
+        daily_data, x="Tanggal Update", y="Jumlah Titik", color="Approval VGREEN",
+        markers=True, title="Tren Pergerakan Status Lahan Harian",
+        labels={"Tanggal Update": "Tanggal", "Jumlah Titik": "Total Lahan"},
+        color_discrete_sequence=px.colors.qualitative.Set1
+    )
+    fig_daily.update_xaxes(type='category', tickformat="%Y-%m-%d")
+    fig_daily.update_layout(height=400, xaxis_title="Tanggal", yaxis_title="Jumlah Titik Lahan")
+    st.plotly_chart(fig_daily, use_container_width=True)
+else:
+    st.info("Belum ada data untuk menampilkan grafik pergerakan harian.")
 
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 4. SIDEBAR: FORM MANUAL & UPLOAD EXCEL (MASSIVE INPUT)
+# 4. SIDEBAR: FORM MANUAL & UPLOAD EXCEL (WRITE TO GOOGLE SHEETS)
 # ---------------------------------------------------------
 st.sidebar.header("📥 Input Massal (Upload Excel)")
 
-# Tombol Download Template Excel
 excel_template = generate_excel_template()
 st.sidebar.download_button(
     label="1. ⬇️ Download Template Excel",
@@ -217,10 +206,7 @@ uploaded_file = st.sidebar.file_uploader("Upload Excel File", type=["xlsx", "xls
 
 if uploaded_file is not None:
     try:
-        # Membaca file excel yang diunggah
         df_uploaded = pd.read_excel(uploaded_file)
-        
-        # Validasi kolom agar sesuai dengan database
         expected_columns = [
             "Site ID", "Nama Lokasi", "Provinsi", "Kota/Kabupaten",
             "Jumlah EVCS", "Jumlah BSS", "PIC Hunter", 
@@ -229,14 +215,30 @@ if uploaded_file is not None:
         ]
         
         if all(col in df_uploaded.columns for col in expected_columns):
-            # Konversi tanggal ke dt.date dan bersihkan NaN
-            df_uploaded['Tanggal Update'] = pd.to_datetime(df_uploaded['Tanggal Update']).dt.date
+            df_uploaded['Tanggal Update'] = pd.to_datetime(df_uploaded['Tanggal Update']).dt.strftime('%Y-%m-%d')
             df_uploaded = df_uploaded.fillna("")
             
-            # Gabungkan dengan data yang sudah ada di session
-            if st.sidebar.button("💾 Konfirmasi & Simpan Data Excel"):
-                st.session_state.landlist_data = pd.concat([st.session_state.landlist_data, df_uploaded], ignore_index=True)
-                st.sidebar.success(f"Berhasil mengunggah {len(df_uploaded)} data baru!")
+            if st.sidebar.button("💾 Konfirmasi & Simpan ke Google Sheets"):
+                with st.spinner('Menyimpan ke Google Sheets...'):
+                    # 1. Hapus duplikat di dalam file Excel yang diunggah itu sendiri
+                    df_uploaded = df_uploaded.drop_duplicates(subset=['Site ID'], keep='last')
+                    
+                    # 2. Filter data baru: Hanya ambil Site ID yang BELUM ada di Google Sheets (df)
+                    if not df.empty and 'Site ID' in df.columns:
+                        existing_site_ids = df['Site ID'].tolist()
+                    else:
+                        existing_site_ids = []
+                        
+                    df_baru = df_uploaded[~df_uploaded['Site ID'].isin(existing_site_ids)]
+                    
+                    if not df_baru.empty:
+                        # Gabungkan data lama dan baru (yang sudah terfilter), lalu update ke Sheets
+                        updated_df = pd.concat([df, df_baru], ignore_index=True)
+                        conn.update(worksheet="Sheet1", data=updated_df)
+                        st.cache_data.clear() # Bersihkan cache agar data terbaru langsung ditarik
+                        st.sidebar.success(f"Berhasil menambahkan {len(df_baru)} data baru ke Google Sheets!")
+                    else:
+                        st.sidebar.warning("Tidak ada data baru ditambahkan. Semua Site ID dalam file Excel sudah ada di database.")
                 st.rerun()
         else:
             st.sidebar.error("Format kolom tidak sesuai dengan template!")
@@ -270,16 +272,25 @@ with st.sidebar.form("form_tambah_lahan", clear_on_submit=True):
     submitted = st.form_submit_button("Simpan Manual")
     if submitted:
         if site_id and nama_lokasi:
-            new_row = {
-                "Site ID": site_id, "Nama Lokasi": nama_lokasi, "Provinsi": provinsi_input,
-                "Kota/Kabupaten": kota_input, "Jumlah EVCS": int(jumlah_evcs), "Jumlah BSS": int(jumlah_bss),
-                "PIC Hunter": pic_hunter, "Status Approach": status_approach, "Status Deal": status_deal,
-                "Kelengkapan Dokumen": status_dokumen, "Approval VGREEN": status_vgreen,
-                "Tanggal Update": pd.to_datetime(tanggal_update).date() # Simpan sebagai tipe Date
-            }
-            st.session_state.landlist_data = pd.concat([st.session_state.landlist_data, pd.DataFrame([new_row])], ignore_index=True)
-            st.success(f"Titik {site_id} berhasil ditambahkan!")
-            st.rerun()
+            # Pengecekan Duplikasi: Apakah Site ID sudah ada di database?
+            if not df.empty and 'Site ID' in df.columns and site_id in df['Site ID'].values:
+                st.error(f"Gagal Menyimpan! Site ID '{site_id}' sudah terdaftar di database.")
+            else:
+                new_row = pd.DataFrame([{
+                    "Site ID": site_id, "Nama Lokasi": nama_lokasi, "Provinsi": provinsi_input,
+                    "Kota/Kabupaten": kota_input, "Jumlah EVCS": int(jumlah_evcs), "Jumlah BSS": int(jumlah_bss),
+                    "PIC Hunter": pic_hunter, "Status Approach": status_approach, "Status Deal": status_deal,
+                    "Kelengkapan Dokumen": status_dokumen, "Approval VGREEN": status_vgreen,
+                    "Tanggal Update": pd.to_datetime(tanggal_update).strftime('%Y-%m-%d')
+                }])
+                
+                with st.spinner('Menyimpan ke Google Sheets...'):
+                    updated_df = pd.concat([df, new_row], ignore_index=True)
+                    conn.update(worksheet="Sheet1", data=updated_df)
+                    st.cache_data.clear()
+                    
+                st.success(f"Titik {site_id} berhasil disimpan ke Google Sheets!")
+                st.rerun()
         else:
             st.error("Site ID dan Nama Lokasi wajib diisi.")
 
@@ -288,28 +299,29 @@ with st.sidebar.form("form_tambah_lahan", clear_on_submit=True):
 # ---------------------------------------------------------
 st.subheader("📋 Database & Tracking Detail Lahan")
 
-filter_col1, filter_col2, filter_col3 = st.columns(3)
-with filter_col1:
-    filter_prov = st.multiselect("Filter Provinsi", options=df["Provinsi"].unique(), default=df["Provinsi"].unique())
-with filter_col2:
-    filter_kota = st.multiselect("Filter Kota/Kabupaten", options=df["Kota/Kabupaten"].unique(), default=df["Kota/Kabupaten"].unique())
-with filter_col3:
-    filter_approval = st.multiselect("Filter Status Approval VGREEN", options=df["Approval VGREEN"].unique(), default=df["Approval VGREEN"].unique())
+if not df.empty:
+    filter_col1, filter_col2, filter_col3 = st.columns(3)
+    with filter_col1:
+        filter_prov = st.multiselect("Filter Provinsi", options=df["Provinsi"].unique(), default=df["Provinsi"].unique())
+    with filter_col2:
+        filter_kota = st.multiselect("Filter Kota/Kabupaten", options=df["Kota/Kabupaten"].unique(), default=df["Kota/Kabupaten"].unique())
+    with filter_col3:
+        filter_approval = st.multiselect("Filter Status Approval VGREEN", options=df["Approval VGREEN"].unique(), default=df["Approval VGREEN"].unique())
 
-filtered_df = df[
-    (df["Provinsi"].isin(filter_prov)) &
-    (df["Kota/Kabupaten"].isin(filter_kota)) & 
-    (df["Approval VGREEN"].isin(filter_approval))
-]
+    filtered_df = df[
+        (df["Provinsi"].isin(filter_prov)) &
+        (df["Kota/Kabupaten"].isin(filter_kota)) & 
+        (df["Approval VGREEN"].isin(filter_approval))
+    ]
 
-# Formatting ke str untuk tampilan tabel (aman karena sudah di-filter type date sebelumnya)
-filtered_df['Tanggal Update'] = pd.to_datetime(filtered_df['Tanggal Update']).dt.strftime('%Y-%m-%d')
-st.dataframe(filtered_df, use_container_width=True)
+    st.dataframe(filtered_df, use_container_width=True)
 
-csv = filtered_df.to_csv(index=False).encode('utf-8')
-st.download_button(
-    label="📥 Unduh Data saat ini (CSV)",
-    data=csv,
-    file_name='landlist_vgreen_progress.csv',
-    mime='text/csv'
-)
+    csv = filtered_df.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="📥 Unduh Data saat ini (CSV)",
+        data=csv,
+        file_name='landlist_vgreen_progress.csv',
+        mime='text/csv'
+    )
+else:
+    st.info("Database masih kosong. Silakan input data melalui form atau upload Excel di sebelah kiri.")
